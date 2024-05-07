@@ -131,8 +131,9 @@ static inline u64 get_on_cpu_cycles(u32 *cpu_id)
 	int error;
 
 	// TODO: Fix Verifier errors upon changing this to bpf_perf_event_read_value
-	error = bpf_perf_event_read(&cpu_cycles_event_reader, *cpu_id);
-	if (error < 0) {
+	error = bpf_perf_event_read_value(
+		&cpu_cycles_event_reader, *cpu_id, &c, sizeof(c));
+	if (error) {
 		return delta;
 	}
 	val = c.counter;
@@ -236,7 +237,7 @@ int kepler_sched_switch_trace(struct sched_switch_info *ctx)
 		prev_pid_metrics->cache_miss += buf.cache_miss;
 	}
 
-	// creat new process metrics
+	// create new process metrics
 	cur_pid_metrics = bpf_map_lookup_elem(&processes, &cur_pid);
 	if (!cur_pid_metrics) {
 		process_metrics_t new_process = {};
