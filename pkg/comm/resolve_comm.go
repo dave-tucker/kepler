@@ -66,19 +66,27 @@ func (r *CommResolver) Clear(freed []int) {
 }
 
 func readCommandFromProcFs(pid int) (string, error) {
-	if _, err := os.Stat("/proc/" + strconv.Itoa(pid)); os.IsNotExist(err) {
-		return "", err
-	}
 	var comm string
-	if cmdLineBytes, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline"); err == nil {
-		comm = readCommandFromProcFsCmdline(cmdLineBytes)
+
+	cmdLineBytes, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+	if err != nil {
+		// Early return if the process is not running
+		if os.IsNotExist(err) {
+			return unknownComm, err
+		}
 	}
+
+	comm = readCommandFromProcFsCmdline(cmdLineBytes)
 	if comm != "" {
 		return comm, nil
 	}
-	if commBytes, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm"); err == nil {
-		comm = readCommandFromProcFsComm(commBytes)
+
+	commBytes, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm")
+	if err != nil {
+		return unknownComm, err
 	}
+
+	comm = readCommandFromProcFsComm(commBytes)
 	if comm != "" {
 		return comm, nil
 	}
