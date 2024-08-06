@@ -23,7 +23,7 @@ github.com/bits-and-blooms/bitset
 # github.com/cespare/xxhash/v2 v2.3.0
 ## explicit; go 1.11
 github.com/cespare/xxhash/v2
-# github.com/cilium/ebpf v0.16.0
+# github.com/cilium/ebpf v0.16.0 => ./cilium-ebpf
 ## explicit; go 1.21
 github.com/cilium/ebpf
 github.com/cilium/ebpf/asm
@@ -652,3 +652,4 @@ sigs.k8s.io/structured-merge-diff/v4/value
 # sigs.k8s.io/yaml v1.3.0
 ## explicit; go 1.12
 sigs.k8s.io/yaml
+# github.com/cilium/ebpf => ./cilium-ebpf

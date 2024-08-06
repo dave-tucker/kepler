@@ -4,10 +4,12 @@
 #include "kepler.bpf.h"
 
 // Ring buffer sizing
-// 256kB is sufficient to store around 1000 events/sec for 5 seconds
+// 80 bytes per record
+// 5000 events/sec for 5 seconds
+// 80 * 5000 * 5 = 2,000,000 bytes
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 256 * 1024); // 256 KB
+	__uint(max_entries, 2097152); // 2 MiB
 } rb SEC(".maps");
 struct {
 	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
@@ -67,15 +69,13 @@ static __always_inline u64 get_on_cpu_cache_miss(u32 *cpu_id)
 	return c.counter;
 }
 
-// Wake up userspace if there are at least 1000 events unprocessed
-const long wakeup_data_size = sizeof(struct event) * 1000;
+const volatile long wakeup_data_size = 0;
 
 // Get the flags for the ring buffer submit
 static inline long get_flags()
 {
 	long sz;
-
-	if (!wakeup_data_size)
+	if (wakeup_data_size == 0)
 		return 0;
 
 	sz = bpf_ringbuf_query(&rb, BPF_RB_AVAIL_DATA);

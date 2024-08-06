@@ -4,6 +4,8 @@ go 1.21.0
 
 toolchain go1.21.9
 
+replace github.com/cilium/ebpf => ./cilium-ebpf
+
 require (
 	github.com/HabanaAI/gohlml v1.16.0
 	github.com/NVIDIA/go-dcgm v0.0.0-20240118201113-3385e277e49f

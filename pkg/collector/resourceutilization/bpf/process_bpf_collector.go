@@ -97,7 +97,6 @@ func UpdateProcessBPFMetrics(bpfExporter bpf.Exporter, processStats map[uint64]*
 		processComm, err := commResolver.ResolveComm(int(ct.Pid))
 		if err != nil {
 			// skip process that is not running
-			klog.V(6).Infof("failed to resolve comm for PID %v: %v, set comm=%s", ct.Pid, err, utils.SystemProcessName)
 			continue
 		}
 

@@ -80,6 +80,9 @@ var (
 	redfishCredFilePath          = flag.String("redfish-cred-file-path", "", "path to the redfish credential file")
 	exposeEstimatedIdlePower     = flag.Bool("expose-estimated-idle-power", false, "estimated idle power is meaningful only if Kepler is running on bare-metal or when there is only one virtual machine on the node")
 	bpfDebugMetricsEnabled       = flag.Bool("bpf-debug-metrics", false, "whether to enable debug metrics for eBPF")
+	bpfWakeupDataSize            = flag.Int("bpf-wakeup-data-size", 500, "when kepler should wake up to read the ringbuffer in bytes")
+	bpfBurstCapacity             = flag.Int("bpf-burst-capacity", 200, "the maximum number of events that can be processed in a single burst")
+	bpfRateLimitInterval         = flag.Int("bpf-rate-limit-interval", 100, "the interval in nanoseconds to refill the rate limiter")
 )
 
 func healthProbe(w http.ResponseWriter, req *http.Request) {
@@ -146,7 +149,7 @@ func main() {
 		defer accelerator.Shutdown()
 	}
 
-	bpfExporter, err := bpf.NewExporter()
+	bpfExporter, err := bpf.NewExporter(*bpfWakeupDataSize, *bpfBurstCapacity, *bpfRateLimitInterval)
 	if err != nil {
 		klog.Fatalf("failed to create eBPF exporter: %v", err)
 	}

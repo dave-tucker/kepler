@@ -21,9 +21,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
@@ -55,6 +57,7 @@ type exporter struct {
 	eventsRead      prometheus.Counter
 	eventsProcessed prometheus.Counter
 	channelDepth    prometheus.GaugeFunc
+	ringBufDepth    prometheus.GaugeFunc
 
 	// Locks processMetrics and freedPIDs.
 	// Acquired in CollectProcesses - to prevent new events from being processed
@@ -67,18 +70,30 @@ type exporter struct {
 	processMetrics map[uint32]*bpfMetrics
 	freedPIDs      []int
 
-	ringbufReader *ringbuf.Reader
-	eventsChan    chan *keplerEvent
+	ringbufReader       *ringbuf.Reader
+	eventsChan          chan keplerEvent
+	wakeupDataSize      int
+	burstCapacity       int
+	rateLimitIntervalNs int
 }
 
-func NewExporter() (Exporter, error) {
+// recordSize is calculated as follows:
+// 1. Calculate the size of the keplerEvent struct.
+// 2. Align the size to the nearest multiple of 8 bytes.
+// 3. Add 8 bytes to account for the ring buffer header.
+var recordSize int = int(math.Ceil(float64(binary.Size(keplerEvent{}))/8))*8 + 8
+
+func NewExporter(wakeupDataSize, burstCapacity, rateLimitIntervalNs int) (Exporter, error) {
 	e := &exporter{
 		cpus:                    ebpf.MustPossibleCPU(),
 		enabledHardwareCounters: sets.New[string](),
 		enabledSoftwareCounters: sets.New[string](),
 		mu:                      &sync.Mutex{},
 		processMetrics:          make(map[uint32]*bpfMetrics),
-		eventsChan:              make(chan *keplerEvent, 1024),
+		eventsChan:              make(chan keplerEvent, 5000), // handle a burst of 5000 events
+		wakeupDataSize:          wakeupDataSize * recordSize,
+		burstCapacity:           burstCapacity,
+		rateLimitIntervalNs:     rateLimitIntervalNs,
 	}
 	e.eventsRead = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "kepler_bpf_exporter_events_read_total",
@@ -100,6 +115,15 @@ func NewExporter() (Exporter, error) {
 			return float64(len(e.eventsChan))
 		},
 	)
+	e.ringBufDepth = prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "kepler_bpf_exporter_ring_buffer_depth",
+			Help: "Current depth of the ring buffer",
+		},
+		func() float64 {
+			return float64(e.ringbufReader.AvailableData())
+		},
+	)
 	err := e.attach()
 	if err != nil {
 		e.Detach()
@@ -111,6 +135,7 @@ func (e *exporter) RegisterMetrics(registry *prometheus.Registry) {
 	registry.MustRegister(e.eventsRead)
 	registry.MustRegister(e.eventsProcessed)
 	registry.MustRegister(e.channelDepth)
+	registry.MustRegister(e.ringBufDepth)
 }
 
 func (e *exporter) SupportedMetrics() SupportedMetrics {
@@ -133,13 +158,10 @@ func (e *exporter) attach() error {
 	}
 
 	// Adjust map sizes to the number of available CPUs
-	numCPU := getCPUCores()
-	klog.Infof("Number of CPUs: %d", numCPU)
-	for _, m := range specs.Maps {
-		// Only resize maps that have a MaxEntries of NUM_CPUS constant
-		if m.MaxEntries == 128 {
-			m.MaxEntries = uint32(numCPU)
-		}
+	if err := specs.RewriteConstants(map[string]interface{}{
+		"wakeup_data_size": int64(e.wakeupDataSize),
+	}); err != nil {
+		return fmt.Errorf("error rewriting constants: %v", err)
 	}
 
 	// Load the eBPF program(s)
@@ -206,6 +228,7 @@ func (e *exporter) attach() error {
 		return nil
 	}
 
+	numCPU := getCPUCores()
 	e.perfEvents, err = createHardwarePerfEvents(
 		e.bpfObjects.CpuInstructionsEventReader,
 		e.bpfObjects.CpuCyclesEventReader,
@@ -263,8 +286,9 @@ func (e *exporter) Start(stopChan <-chan struct{}) error {
 	defer e.ringbufReader.Close()
 
 	wg := &sync.WaitGroup{}
-	wg.Add(2)
+	wg.Add(1)
 	go e.ringBufReader(wg, stopChan)
+	wg.Add(1)
 	go e.eventProcessor(wg, stopChan)
 	wg.Wait()
 
@@ -273,16 +297,13 @@ func (e *exporter) Start(stopChan <-chan struct{}) error {
 
 func (e *exporter) ringBufReader(wg *sync.WaitGroup, stopChan <-chan struct{}) {
 	defer wg.Done()
+	record := new(ringbuf.Record)
 	for {
-		var record *ringbuf.Record
-
 		select {
 		case <-stopChan:
 			return
 		default:
 			var event keplerEvent
-			record = new(ringbuf.Record)
-
 			err := e.ringbufReader.ReadInto(record)
 			if err != nil {
 				if errors.Is(err, ringbuf.ErrClosed) {
@@ -300,7 +321,7 @@ func (e *exporter) ringBufReader(wg *sync.WaitGroup, stopChan <-chan struct{}) {
 				continue
 			}
 			// process events on another channel to avoid blocking the ring buffer reader
-			e.eventsChan <- &event
+			e.eventsChan <- event
 			e.eventsRead.Inc()
 		}
 	}
@@ -308,11 +329,14 @@ func (e *exporter) ringBufReader(wg *sync.WaitGroup, stopChan <-chan struct{}) {
 
 func (e *exporter) eventProcessor(wg *sync.WaitGroup, stopChan <-chan struct{}) {
 	defer wg.Done()
+	limiter := time.NewTicker(time.Duration(e.rateLimitIntervalNs) * time.Nanosecond)
 	for {
 		select {
 		case <-stopChan:
 			return
 		case event := <-e.eventsChan:
+			// Wait for the limiter to allow us to process the next event
+			<-limiter.C
 			e.mu.Lock()
 
 			var p *bpfMetrics
